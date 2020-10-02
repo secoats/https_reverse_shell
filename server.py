@@ -156,6 +156,7 @@ def handle_client(conn, source):
     except Exception as e:
         print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
         print(e)
+        
         if conn:
             conn.write(build_response(headers={"Connection": "Closed"}, payload="", response_type="400 Bad Request"))
             conn.close()
@@ -177,12 +178,14 @@ print("[*] Listening on port {}...".format(PORT))
 def listening_loop():
     while not interrupted:
         conn = None
-        incoming_socket, incoming_addr = sock.accept()
         try:
+            incoming_socket, incoming_addr = sock.accept()
             conn = context.wrap_socket(incoming_socket, server_side=True)
             handle_client(conn, incoming_addr)
         except ssl.SSLError as e:
             print(e)
+        except:
+            print("[!] Unusual socket behavior detected. Are you getting scanned?")
         finally:
             if conn:
                 conn.close()
