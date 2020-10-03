@@ -40,6 +40,7 @@ None
 * Handle multiple clients
 * Proper client session instead of just RCE
 * Python2 version of client
+* C version of client
 * Actually take Content-Length into account for big responses [done]
 * Auto-create key/cert
 * Control client polling speed
